@@ -1,7 +1,6 @@
 import pandas as pd
 
 from yfinance import utils
-from yfinance.data import TickerData
 from yfinance.data import YfData
 from yfinance.exceptions import YFNotImplementedError
 
@@ -19,6 +18,7 @@ class Analysis:
         self._analyst_growth_estimates = None
         self._rev_est = None
         self._eps_est = None
+        self._eps_rev = None
         self._already_scraped = False
 
     @property
@@ -51,8 +51,15 @@ class Analysis:
             self._scrape(self.proxy)
         return self._eps_est
 
+    @property
+    def eps_rev(self) -> pd.DataFrame:
+        if self._eps_rev is None and not self._already_scraped:
+            self._scrape(self.proxy)
+        return self._eps_rev
+
+
     def _scrape(self, proxy):
-        ticker_url = f"{self._SCRAPE_URL_}/{self._data.ticker}"
+        ticker_url = f"{self._SCRAPE_URL_}/{self._symbol}"
         try:
             resp = self._data.cache_get(ticker_url + '/analysis', proxy=proxy)
             analysis = pd.read_html(resp.text)
@@ -84,16 +91,15 @@ class Analysis:
                         # convert number-like values to integer type
                         f = item[c].str.endswith(('K', 'M', 'B', 'T'))
                         if f.any():
-                            fB = item[c].str.endswith('B')
-                            fM = item[c].str.endswith('M')
-                            fK = item[c].str.endswith('K')
-                            fT = item[c].str.endswith('T')
+                            fB = item[c].str.endswith('B').fillna(False)
+                            fM = item[c].str.endswith('M').fillna(False)
+                            fK = item[c].str.endswith('K').fillna(False)
+                            fT = item[c].str.endswith('T').fillna(False)
                             item[c] = item[c].str.rstrip('KMBT').astype("float")
                             item.loc[fB, c] *= 1e9
                             item.loc[fM, c] *= 1e6
                             item.loc[fK, c] *= 1e3
                             item.loc[fT, c] *= 1e12
-                            item[c] = item[c].astype("int")
 
             if key == 'Earnings History':
                 self._earnings_trend = item
@@ -105,5 +111,7 @@ class Analysis:
                 self._rev_est = item
             elif key == 'Earnings Estimate':
                 self._eps_est = item
+            elif key == 'EPS Revisions':
+                self._eps_rev = item
 
         self._already_scraped = True
