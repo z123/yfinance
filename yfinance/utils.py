@@ -21,22 +21,16 @@
 
 from __future__ import print_function
 
-import atexit as _atexit
-
 import datetime as _datetime
 import logging
-import os as _os
 import re as _re
-import sqlite3 as _sqlite3
 import sys as _sys
 import threading
 from functools import lru_cache
 from inspect import getmembers
-from threading import Lock
 from types import FunctionType
-from typing import Dict, Union, List, Optional
+from typing import Dict, List, Optional
 
-import appdirs as _ad
 import numpy as _np
 import pandas as _pd
 import pytz as _tz
@@ -169,14 +163,15 @@ def setup_debug_formatting():
         yf_logger.warning("logging mode not set to 'DEBUG', so not setting up debug formatting")
         return
 
-    if yf_logger.handlers is None or len(yf_logger.handlers) == 0:
-        h = logging.StreamHandler()
-        # Ensure different level strings don't interfere with indentation
-        formatter = MultiLineFormatter(fmt='%(levelname)-8s %(message)s')
-        h.setFormatter(formatter)
-        yf_logger.addHandler(h)
-
     global yf_log_indented
+    if not yf_log_indented:
+        if yf_logger.handlers is None or len(yf_logger.handlers) == 0:
+            h = logging.StreamHandler()
+            # Ensure different level strings don't interfere with indentation
+            formatter = MultiLineFormatter(fmt='%(levelname)-8s %(message)s')
+            h.setFormatter(formatter)
+            yf_logger.addHandler(h)
+
     yf_log_indented = True
 
 
@@ -628,30 +623,32 @@ def fix_Yahoo_returning_live_separate(quotes, interval, tz_exchange):
                     # Yahoo is not returning live data (phew!)
                     return quotes
                 if _np.isnan(quotes.loc[idx2, "Open"]):
-                    quotes.loc[idx2, "Open"] = quotes["Open"][n - 1]
+                    quotes.loc[idx2, "Open"] = quotes["Open"].iloc[n - 1]
                 # Note: nanmax() & nanmin() ignores NaNs, but still need to check not all are NaN to avoid warnings
-                if not _np.isnan(quotes["High"][n - 1]):
-                    quotes.loc[idx2, "High"] = _np.nanmax([quotes["High"][n - 1], quotes["High"][n - 2]])
+                if not _np.isnan(quotes["High"].iloc[n - 1]):
+                    quotes.loc[idx2, "High"] = _np.nanmax([quotes["High"].iloc[n - 1], quotes["High"].iloc[n - 2]])
                     if "Adj High" in quotes.columns:
-                        quotes.loc[idx2, "Adj High"] = _np.nanmax([quotes["Adj High"][n - 1], quotes["Adj High"][n - 2]])
+                        quotes.loc[idx2, "Adj High"] = _np.nanmax([quotes["Adj High"].iloc[n - 1], quotes["Adj High"].iloc[n - 2]])
 
-                if not _np.isnan(quotes["Low"][n - 1]):
-                    quotes.loc[idx2, "Low"] = _np.nanmin([quotes["Low"][n - 1], quotes["Low"][n - 2]])
+                if not _np.isnan(quotes["Low"].iloc[n - 1]):
+                    quotes.loc[idx2, "Low"] = _np.nanmin([quotes["Low"].iloc[n - 1], quotes["Low"].iloc[n - 2]])
                     if "Adj Low" in quotes.columns:
-                        quotes.loc[idx2, "Adj Low"] = _np.nanmin([quotes["Adj Low"][n - 1], quotes["Adj Low"][n - 2]])
+                        quotes.loc[idx2, "Adj Low"] = _np.nanmin([quotes["Adj Low"].iloc[n - 1], quotes["Adj Low"].iloc[n - 2]])
 
-                quotes.loc[idx2, "Close"] = quotes["Close"][n - 1]
+                quotes.loc[idx2, "Close"] = quotes["Close"].iloc[n - 1]
                 if "Adj Close" in quotes.columns:
-                    quotes.loc[idx2, "Adj Close"] = quotes["Adj Close"][n - 1]
-                quotes.loc[idx2, "Volume"] += quotes["Volume"][n - 1]
+                    quotes.loc[idx2, "Adj Close"] = quotes["Adj Close"].iloc[n - 1]
+                quotes.loc[idx2, "Volume"] += quotes["Volume"].iloc[n - 1]
                 quotes = quotes.drop(quotes.index[n - 1])
 
     return quotes
 
 
 def safe_merge_dfs(df_main, df_sub, interval):
-    if df_sub.shape[0] == 0:
+    if df_sub.empty:
         raise Exception("No data to merge")
+    if df_main.empty:
+        return df_main
 
     df_sub_backup = df_sub.copy()
     data_cols = [c for c in df_sub.columns if c not in df_main]
@@ -675,7 +672,14 @@ def safe_merge_dfs(df_main, df_sub, interval):
     else:
         indices = _np.searchsorted(_np.append(df_main.index, df_main.index[-1] + td), df_sub.index, side='right')
         indices -= 1  # Convert from [[i-1], [i]) to [[i], [i+1])
-        # Numpy.searchsorted does not handle out-of-range well, so handle manually:
+    # Numpy.searchsorted does not handle out-of-range well, so handle manually:
+    if intraday:
+        for i in range(len(df_sub.index)):
+            dt = df_sub.index[i].date()
+            if dt < df_main.index[0].date() or dt >= df_main.index[-1].date() + _datetime.timedelta(days=1):
+                # Out-of-range
+                indices[i] = -1
+    else:
         for i in range(len(df_sub.index)):
             dt = df_sub.index[i]
             if dt < df_main.index[0] or dt >= df_main.index[-1] + td:
@@ -683,39 +687,46 @@ def safe_merge_dfs(df_main, df_sub, interval):
                 indices[i] = -1
 
     f_outOfRange = indices == -1
-    if f_outOfRange.any() and not intraday:
-        empty_row_data = {c:[_np.nan] for c in const.price_colnames}|{'Volume':[0]}
-        if interval == '1d':
-            # For 1d, add all out-of-range event dates
-            for i in _np.where(f_outOfRange)[0]:
-                dt = df_sub.index[i]
-                get_yf_logger().debug(f"Adding out-of-range {data_col} @ {dt.date()} in new prices row of NaNs")
-                empty_row = _pd.DataFrame(data=empty_row_data, index=[dt])
-                df_main = _pd.concat([df_main, empty_row], sort=True)
+    if f_outOfRange.any():
+        if intraday:
+            # Discard out-of-range dividends in intraday data, assume user not interested
+            df_sub = df_sub[~f_outOfRange]
+            if df_sub.empty:
+                df_main['Dividends'] = 0.0
+                return df_main
         else:
-            # Else, only add out-of-range event dates if occurring in interval 
-            # immediately after last pricfe row
-            last_dt = df_main.index[-1]
-            next_interval_start_dt = last_dt + td
-            next_interval_end_dt = next_interval_start_dt + td
-            for i in _np.where(f_outOfRange)[0]:
-                dt = df_sub.index[i]
-                if next_interval_start_dt <= dt < next_interval_end_dt:
-                    new_dt = next_interval_start_dt
+            empty_row_data = {**{c:[_np.nan] for c in const.price_colnames}, 'Volume':[0]}
+            if interval == '1d':
+                # For 1d, add all out-of-range event dates
+                for i in _np.where(f_outOfRange)[0]:
+                    dt = df_sub.index[i]
                     get_yf_logger().debug(f"Adding out-of-range {data_col} @ {dt.date()} in new prices row of NaNs")
                     empty_row = _pd.DataFrame(data=empty_row_data, index=[dt])
                     df_main = _pd.concat([df_main, empty_row], sort=True)
-        df_main = df_main.sort_index()
+            else:
+                # Else, only add out-of-range event dates if occurring in interval 
+                # immediately after last price row
+                last_dt = df_main.index[-1]
+                next_interval_start_dt = last_dt + td
+                next_interval_end_dt = next_interval_start_dt + td
+                for i in _np.where(f_outOfRange)[0]:
+                    dt = df_sub.index[i]
+                    if next_interval_start_dt <= dt < next_interval_end_dt:
+                        new_dt = next_interval_start_dt
+                        get_yf_logger().debug(f"Adding out-of-range {data_col} @ {dt.date()} in new prices row of NaNs")
+                        empty_row = _pd.DataFrame(data=empty_row_data, index=[dt])
+                        df_main = _pd.concat([df_main, empty_row], sort=True)
+            df_main = df_main.sort_index()
 
-        # Re-calculate indices
-        indices = _np.searchsorted(_np.append(df_main.index, df_main.index[-1] + td), df_sub.index, side='right')
-        indices -= 1  # Convert from [[i-1], [i]) to [[i], [i+1])
-        # Numpy.searchsorted does not handle out-of-range well, so handle manually:
-        for i in range(len(df_sub.index)):
-            dt = df_sub.index[i]
-            if dt < df_main.index[0] or dt >= df_main.index[-1] + td:
-                # Out-of-range
-                indices[i] = -1
+            # Re-calculate indices
+            indices = _np.searchsorted(_np.append(df_main.index, df_main.index[-1] + td), df_sub.index, side='right')
+            indices -= 1  # Convert from [[i-1], [i]) to [[i], [i+1])
+            # Numpy.searchsorted does not handle out-of-range well, so handle manually:
+            for i in range(len(df_sub.index)):
+                dt = df_sub.index[i]
+                if dt < df_main.index[0] or dt >= df_main.index[-1] + td:
+                    # Out-of-range
+                    indices[i] = -1
 
     f_outOfRange = indices == -1
     if f_outOfRange.any():
@@ -886,191 +897,3 @@ class ProgressBar:
     def __str__(self):
         return str(self.prog_bar)
 
-
-# ---------------------------------
-# TimeZone cache related code
-# ---------------------------------
-
-class _KVStore:
-    """Simple Sqlite backed key/value store, key and value are strings. Should be thread safe."""
-
-    def __init__(self, filename):
-        self._cache_mutex = Lock()
-        with self._cache_mutex:
-            self.conn = _sqlite3.connect(filename, timeout=10, check_same_thread=False)
-            self.conn.execute('pragma journal_mode=wal')
-            try:
-                self.conn.execute('create table if not exists "kv" (key TEXT primary key, value TEXT) without rowid')
-            except Exception as e:
-                if 'near "without": syntax error' in str(e):
-                    # "without rowid" requires sqlite 3.8.2. Older versions will raise exception
-                    self.conn.execute('create table if not exists "kv" (key TEXT primary key, value TEXT)')
-                else:
-                    raise
-            self.conn.commit()
-        _atexit.register(self.close)
-
-    def close(self):
-        if self.conn is not None:
-            with self._cache_mutex:
-                self.conn.close()
-                self.conn = None
-
-    def get(self, key: str) -> Union[str, None]:
-        """Get value for key if it exists else returns None"""
-        try:
-            item = self.conn.execute('select value from "kv" where key=?', (key,))
-        except _sqlite3.IntegrityError as e:
-            self.delete(key)
-            return None
-        if item:
-            return next(item, (None,))[0]
-
-    def set(self, key: str, value: str) -> None:
-        if value is None:
-            self.delete(key)
-        else:
-            with self._cache_mutex:
-                self.conn.execute('replace into "kv" (key, value) values (?,?)', (key, value))
-                self.conn.commit()
-
-    def bulk_set(self, kvdata: Dict[str, str]):
-        records = tuple(i for i in kvdata.items())
-        with self._cache_mutex:
-            self.conn.executemany('replace into "kv" (key, value) values (?,?)', records)
-            self.conn.commit()
-
-    def delete(self, key: str):
-        with self._cache_mutex:
-            self.conn.execute('delete from "kv" where key=?', (key,))
-            self.conn.commit()
-
-
-class _TzCacheException(Exception):
-    pass
-
-
-class _TzCache:
-    """Simple sqlite file cache of ticker->timezone"""
-
-    def __init__(self):
-        self._setup_cache_folder()
-        # Must init db here, where is thread-safe
-        try:
-            self._tz_db = _KVStore(_os.path.join(self._db_dir, "tkr-tz.db"))
-        except _sqlite3.DatabaseError as err:
-            raise _TzCacheException(f"Error creating TzCache folder: '{self._db_dir}' reason: {err}")
-        self._migrate_cache_tkr_tz()
-
-    def _setup_cache_folder(self):
-        if not _os.path.isdir(self._db_dir):
-            try:
-                _os.makedirs(self._db_dir)
-            except OSError as err:
-                raise _TzCacheException(f"Error creating TzCache folder: '{self._db_dir}' reason: {err}")
-
-        elif not (_os.access(self._db_dir, _os.R_OK) and _os.access(self._db_dir, _os.W_OK)):
-            raise _TzCacheException(f"Cannot read and write in TzCache folder: '{self._db_dir}'")
-
-    def lookup(self, tkr):
-        return self.tz_db.get(tkr)
-
-    def store(self, tkr, tz):
-        if tz is None:
-            self.tz_db.delete(tkr)
-        else:
-            tz_db = self.tz_db.get(tkr)
-            if tz_db is not None:
-                if tz != tz_db:
-                    get_yf_logger().debug(f'{tkr}: Overwriting cached TZ "{tz_db}" with different TZ "{tz}"')
-                    self.tz_db.set(tkr, tz)
-            else:
-                self.tz_db.set(tkr, tz)
-
-    @property
-    def _db_dir(self):
-        global _cache_dir
-        return _os.path.join(_cache_dir, "py-yfinance")
-
-    @property
-    def tz_db(self):
-        return self._tz_db
-
-    def _migrate_cache_tkr_tz(self):
-        """Migrate contents from old ticker CSV-cache to SQLite db"""
-        old_cache_file_path = _os.path.join(self._db_dir, "tkr-tz.csv")
-
-        if not _os.path.isfile(old_cache_file_path):
-            return None
-        try:
-            df = _pd.read_csv(old_cache_file_path, index_col="Ticker", on_bad_lines="skip")
-        except _pd.errors.EmptyDataError:
-            _os.remove(old_cache_file_path)
-        except TypeError:
-            _os.remove(old_cache_file_path)
-        else:
-            # Discard corrupt data:
-            df = df[~df["Tz"].isna().to_numpy()]
-            df = df[~(df["Tz"] == '').to_numpy()]
-            df = df[~df.index.isna()]
-            if not df.empty:
-                try:
-                    self.tz_db.bulk_set(df.to_dict()['Tz'])
-                except Exception as e:
-                    # Ignore
-                    pass
-
-            _os.remove(old_cache_file_path)
-
-
-class _TzCacheDummy:
-    """Dummy cache to use if tz cache is disabled"""
-
-    def lookup(self, tkr):
-        return None
-
-    def store(self, tkr, tz):
-        pass
-
-    @property
-    def tz_db(self):
-        return None
-
-
-def get_tz_cache():
-    """
-    Get the timezone cache, initializes it and creates cache folder if needed on first call.
-    If folder cannot be created for some reason it will fall back to initialize a
-    dummy cache with same interface as real cash.
-    """
-    # as this can be called from multiple threads, protect it.
-    with _cache_init_lock:
-        global _tz_cache
-        if _tz_cache is None:
-            try:
-                _tz_cache = _TzCache()
-            except _TzCacheException as err:
-                get_yf_logger().info(f"Failed to create TzCache, reason: {err}. "
-                                     "TzCache will not be used. "
-                                     "Tip: You can direct cache to use a different location with 'set_tz_cache_location(mylocation)'")
-                _tz_cache = _TzCacheDummy()
-
-        return _tz_cache
-
-
-_cache_dir = _ad.user_cache_dir()
-_cache_init_lock = Lock()
-_tz_cache = None
-
-
-def set_tz_cache_location(cache_dir: str):
-    """
-    Sets the path to create the "py-yfinance" cache folder in.
-    Useful if the default folder returned by "appdir.user_cache_dir()" is not writable.
-    Must be called before cache is used (that is, before fetching tickers).
-    :param cache_dir: Path to use for caches
-    :return: None
-    """
-    global _cache_dir, _tz_cache
-    assert _tz_cache is None, "Time Zone cache already initialized, setting path must be done before cache is created"
-    _cache_dir = cache_dir
