@@ -87,7 +87,7 @@ class Analysis:
                 if item[c].dtype in ['str', 'object']:
                     if item[c].str.endswith('%').sum() == item.shape[0]:
                         # All % so convert to numeric
-                        item[c] = item[c].str.rstrip('%').astype("float")
+                        item[c] = item[c].str.rstrip('%').replace(',','').astype("float")
                         if not '%' in c:
                             item = item.rename(columns={c:c+' %'})
                             c += ' %'
