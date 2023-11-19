@@ -3,6 +3,7 @@ import pandas as pd
 from yfinance import utils
 from yfinance.data import YfData
 from yfinance.exceptions import YFNotImplementedError
+import dateutil
 
 
 class Analysis:
@@ -75,7 +76,11 @@ class Analysis:
                 # Flip rows/columns
                 item = item.T
             if key == 'Earnings History':
-                item.index = pd.to_datetime(item.index)
+                try:
+                    item.index = pd.to_datetime(item.index)
+                except dateutil.parser._parser.ParserError:
+                    pass
+
 
             for c in item.columns:
                 # Format % columns
