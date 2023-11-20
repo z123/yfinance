@@ -94,13 +94,13 @@ class Analysis:
 
                     else:
                         # convert number-like values to integer type
-                        f = item[c].str.endswith(('K', 'M', 'B', 'T'))
+                        f = item[c].str.endswith(('K', 'M', 'B', 'T', 'k', 'm', 'b', 't'))
                         if f.any():
-                            fB = item[c].str.endswith('B').fillna(False)
-                            fM = item[c].str.endswith('M').fillna(False)
-                            fK = item[c].str.endswith('K').fillna(False)
-                            fT = item[c].str.endswith('T').fillna(False)
-                            item[c] = item[c].str.rstrip('KMBT').astype("float")
+                            fB = item[c].str.endswith(('B','b')).fillna(False)
+                            fM = item[c].str.endswith(('M', 'm')).fillna(False)
+                            fK = item[c].str.endswith(('K', 'k')).fillna(False)
+                            fT = item[c].str.endswith(('T', 't')).fillna(False)
+                            item[c] = item[c].str.rstrip('KMBTkmbt').astype("float")
                             item.loc[fB, c] *= 1e9
                             item.loc[fM, c] *= 1e6
                             item.loc[fK, c] *= 1e3
